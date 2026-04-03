@@ -228,7 +228,9 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
         content = result["messages"][-1].content
 
         if len(content) > LENGTH_THRESHOLD:
-            artifact = await self.artifact_manager.aadd_artifact(content, description)
+            artifact = await self.artifact_manager.aadd_artifact(
+                content, agent_name, description
+            )
             return artifact
         else:
             return content

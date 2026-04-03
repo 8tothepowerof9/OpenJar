@@ -93,14 +93,16 @@ Your goal is to complete the task in the fewest possible turns
 2. Do not attempt to delegate this task again; you are the final executor.
 """
 
-BLACKLISTED_TOOLS = frozenset([
-    "start_async_task",
-    "check_async_task",
-    "cancel_async_task",
-    "list_async_task",
-    "update_async_task",
-    "start_multiagent_solver",
-])
+BLACKLISTED_TOOLS = frozenset(
+    [
+        "start_async_task",
+        "check_async_task",
+        "cancel_async_task",
+        "list_async_task",
+        "update_async_task",
+        "start_multiagent_solver",
+    ]
+)
 
 
 class AsyncMultiAgentMiddleware(AgentMiddleware):
@@ -183,7 +185,9 @@ class AsyncMultiAgentMiddleware(AgentMiddleware):
         content = result["messages"][-1].content
 
         if len(content) > LENGTH_THRESHOLD:
-            artifact = await self.artifact_manager.aadd_artifact(content, description)
+            artifact = await self.artifact_manager.aadd_artifact(
+                content, "complex_task_solver", description
+            )
             return artifact
         else:
             return content
@@ -217,7 +221,9 @@ class AsyncMultiAgentMiddleware(AgentMiddleware):
 
         return start_multiagent_solver
 
-    def _override_with_solver_tool(self, request: ModelRequest[None]) -> ModelRequest[None]:
+    def _override_with_solver_tool(
+        self, request: ModelRequest[None]
+    ) -> ModelRequest[None]:
         """Build the solver tool from the current request's tools/model and inject it."""
         tools = request.tools
         available_tools = [

@@ -14,6 +14,7 @@ from src.agent.artifact_manager import ArtifactManager
 from src.agent.job_manager import Job, JobManager
 from src.agent.loader import AgentLoader, create_shared_middleware
 from src.agent.middlewares import (
+    ArtifactMiddleware,
     AsyncMultiAgentMiddleware,
     AsyncSubAgentMiddleware,
     GetSubAgentsMiddleware,
@@ -184,9 +185,7 @@ class OpenJar:
 
         await self._safe_publish(channel_name, payload)
 
-        await self._completed_jobs.put(
-            self.job_manager.get_job(job.id, consume=True)
-        )
+        await self._completed_jobs.put(self.job_manager.get_job(job.id, consume=True))
 
     # ==========================================
     # MAIN AGENT
@@ -224,6 +223,7 @@ class OpenJar:
                 dynamic_prompt_middleware=dynamic_prompt,
                 recursion_limit=self.config["subagent_recursion_limit"],
             ),
+            ArtifactMiddleware(artifact_manager=self.artifact_manager),
             dynamic_prompt,
         ]
 
@@ -261,7 +261,6 @@ class OpenJar:
 
         messages = []
 
-        # Drain completed jobs (non-blocking)
         while not self._completed_jobs.empty():
             try:
                 job_message = self._completed_jobs.get_nowait()

@@ -98,7 +98,7 @@ class SubAgentMiddleware(AgentMiddleware):
 
             if len(content) > LENGTH_THRESHOLD:
                 artifact = await self.artifact_manager.aadd_artifact(
-                    content, description
+                    content, agent_name, description
                 )
                 return f"Result too long, saved as {artifact}"
             else:

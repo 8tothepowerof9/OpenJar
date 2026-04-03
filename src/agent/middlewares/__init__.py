@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from src.agent.middlewares.artifact import ArtifactMiddleware
     from src.agent.middlewares.async_subagent import AsyncSubAgentMiddleware
     from src.agent.middlewares.base import SystemPromptMiddleware
     from src.agent.middlewares.complex_task import AsyncMultiAgentMiddleware
@@ -20,6 +21,7 @@ _MOVED_PATHS = {
     "SkillMiddleware": "src.agent.middlewares.skills",
     "SkillRegistry": "src.agent.middlewares.skills",
     "create_shared_middleware": "src.agent.middlewares.shared",
+    "ArtifactMiddleware": "src.agent.middlewares.artifact",
 }
 
 

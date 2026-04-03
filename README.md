@@ -149,28 +149,30 @@ if __name__ == "__main__":
 
 ## Roadmap / Planned Features
 
-- Long-term and mid-term memory layers
-- Prompt-injection defense and sensitive-data redaction
-- Centralized environment and secret management
-- Trigger and schedule orchestration
-- Speech-to-text (STT) and text-to-speech (TTS)
-- Tool runtime sandboxing
-- Least-privilege data access for browser and online sources
-- Tool code safety validation
-- Human-in-the-loop approvals and checkpoints
-- Agent steering and policy controls
-- Persistent memory update workflows
-- Browser automation and control
-- Multi-channel chat interfaces
-- Enhanced CLI application experience
-- Multi-modal input support
-- Cost tracking, tracing, and observability
-- Multi-session chat threading
-- Reusable skill system
-- Infinite-loop prevention safeguards
-- Document and file understanding pipeline
-- Sandboxed code execution
-- Agent teams / Swarms / Different patterns of multiagents
-- Restrict passing full context between agents
-- Customize main agent's soul/personality
-- Add workflow to start everytime agent is woken up, or start of new day (or detect user start to engage)
+| # | Feature | Category |
+|---|---------|----------|
+| 1 | Long-term and mid-term memory layers | Memory |
+| 2 | Persistent memory update workflows | Memory |
+| 3 | Prompt-injection defense and sensitive-data redaction | Security |
+| 4 | Tool runtime sandboxing | Security |
+| 5 | Tool code safety validation | Security |
+| 6 | Sandboxed code execution | Security |
+| 7 | Least-privilege data access for browser and online sources | Security |
+| 8 | Centralized environment and secret management | Infrastructure |
+| 9 | Trigger and schedule orchestration | Infrastructure |
+| 10 | Cost tracking, tracing, and observability | Infrastructure |
+| 11 | Human-in-the-loop approvals and checkpoints | Agent Control |
+| 12 | Agent steering and policy controls | Agent Control |
+| 13 | Infinite-loop prevention safeguards | Agent Control |
+| 14 | Restrict passing full context between agents | Agent Control |
+| 15 | Customize main agent's soul/personality | Agent Control |
+| 16 | Add workflow to start every time agent is woken up, or start of new day | Agent Control |
+| 17 | Agent teams / Swarms / Different patterns of multiagents | Multi-Agent |
+| 18 | Multi-session chat threading | Multi-Agent |
+| 19 | Speech-to-text (STT) and text-to-speech (TTS) | I/O & Interface |
+| 20 | Browser automation and control | I/O & Interface |
+| 21 | Multi-channel chat interfaces | I/O & Interface |
+| 22 | Enhanced CLI application experience | I/O & Interface |
+| 23 | Multi-modal input support | I/O & Interface |
+| 24 | Document and file understanding pipeline | I/O & Interface |
+| 25 | Reusable skill system | Extensibility |

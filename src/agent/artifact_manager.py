@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from langchain.agents import create_agent
 from langchain.chat_models import BaseChatModel
@@ -12,7 +13,7 @@ You are a summarization agent. You will receive a task description and its resul
 Personality: {personality}
 
 Your job:
-1. Condense the content into a very concise and dense summary containing a few sentences.
+1. Create a tl;dr summary of the result content that captures all the key information relevant to the task description.
 2. Preserve all notable findings, key data points, specific names, numbers, and conclusions.
 3. Retain any warnings, errors, or actionable recommendations verbatim.
 4. Use bullet points for multiple distinct findings.
@@ -29,11 +30,13 @@ Respond according to your given personality and style, but ensure the summary is
 @dataclass
 class Artifact:
     id: str
+    agent: str
     summary: str
     full_content: str
+    created_at: datetime = datetime.now()
 
     def __str__(self) -> str:
-        return f"Artifact {self.id}: {self.summary}"
+        return f"Artifact {self.id} created by {self.agent}: {self.summary}"
 
 
 class ArtifactManager:
@@ -58,7 +61,7 @@ class ArtifactManager:
         )
         self.artifacts: dict[str, Artifact] = {}
 
-    def add_artifact(self, content: str, task_description: str) -> Artifact:
+    def add_artifact(self, content: str, agent: str, task_description: str) -> Artifact:
         """
         Add a new artifact to the manager.
 
@@ -72,11 +75,13 @@ class ArtifactManager:
         """
         id = uuid.uuid4().hex[:8]
         summary = self._summarize(content, task_description)
-        artifact = Artifact(id=id, summary=summary, full_content=content)
+        artifact = Artifact(id=id, agent=agent, summary=summary, full_content=content)
         self.artifacts[id] = artifact
         return artifact
 
-    async def aadd_artifact(self, content: str, task_description: str) -> Artifact:
+    async def aadd_artifact(
+        self, content: str, agent: str, task_description: str
+    ) -> Artifact:
         """
         Asynchronously add a new artifact to the manager.
 
@@ -89,12 +94,9 @@ class ArtifactManager:
         """
         id = uuid.uuid4().hex[:8]
         summary = await self._asummarize(content, task_description)
-        artifact = Artifact(id=id, summary=summary, full_content=content)
+        artifact = Artifact(id=id, agent=agent, summary=summary, full_content=content)
         self.artifacts[id] = artifact
         return artifact
-
-    def get_artifact(self, id: str) -> Artifact | None:
-        return self.artifacts.get(id)
 
     def _summarize(self, content: str, task_description: str) -> str:
         content = f"""
@@ -117,3 +119,10 @@ class ArtifactManager:
             {"messages": [HumanMessage(content=content)]}
         )
         return result["messages"][-1].content
+
+    def get_artifact(self, id: str) -> Artifact | None:
+        return self.artifacts.get(id)
+
+    def list_artifacts(self) -> list[Artifact]:
+        cutoff = datetime.now() - timedelta(hours=2)
+        return [a for a in self.artifacts.values() if a.created_at >= cutoff]
