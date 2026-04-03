@@ -1,41 +1,28 @@
-from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
 
-from src.agent.discovery import DiscoveredAgent, discover_agents
+from src.agent.loader import AgentLoader
 
-THRESHOLD = 8
-
-
-def format_agents_list(agents: list[DiscoveredAgent]) -> str:
-    """Format a list of discovered agents into a string for the system prompt."""
-    if not agents:
-        return "No sub-agents available."
-
-    lines = ["\n## Available sub-agents:"]
-    for agent in agents:
-        lines.append(f"- {agent.name}: {agent.description}")
-    return "\n".join(lines)
+THRESHOLD = 10
 
 
-@dynamic_prompt
-def subagents_dynamic_prompt(request: ModelRequest) -> str:
+def create_subagents_dynamic_prompt(loader: AgentLoader):
+    """Factory that returns a dynamic_prompt using the already-loaded AgentLoader.
+
+    Avoids rescanning the filesystem on every model call.
     """
-    A dynamic prompt function that append a SUB-AGENT section to the
-    system prompt if the number of sub-agents is smaller than 8.
-    This allows the agent to quickly get an overview of the available
-    sub-agents and their capabilities,
-    without having to query for them explicitly.
 
-    Args:
-        request (ModelRequest): The model request object containing the current system prompt and other context.
+    @dynamic_prompt
+    def subagents_dynamic_prompt(request: ModelRequest) -> str:
+        original_prompt = request.system_prompt or ""
+        agents = loader.agents  # already loaded, no filesystem I/O
 
-    Returns:
-        str: The modified system prompt with the SUB-AGENT section appended if applicable.
-    """
-    original_prompt = request.system_prompt or ""
-    agents = discover_agents()
+        if len(agents) < THRESHOLD:
+            lines = ["\n## Available sub-agents:"]
+            for agent in agents.values():
+                tag = " [Multi-Agent]" if agent.is_multi else ""
+                lines.append(f"- {agent.name} - {agent.description}{tag}")
+            original_prompt += "\n".join(lines)
 
-    if len(agents) < THRESHOLD:
-        original_prompt += format_agents_list(agents)
+        return original_prompt
 
-    return original_prompt
+    return subagents_dynamic_prompt

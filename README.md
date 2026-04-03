@@ -1,54 +1,22 @@
 # OpenJar
 
-OpenJar is a modular multi-agent orchestration framework built on LangChain/LangGraph-style agents.
-It provides a main orchestrator that dynamically discovers sub-agents from the `agents/` directory and delegates work through middleware-driven tools.
+OpenJar is a modular multi-agent orchestrator built on LangChain and LangGraph.
+It discovers sub-agents from the `agents/` directory, exposes orchestration tools through middleware, and streams responses through Redis-backed channels.
 
-## Features
+## What It Does
 
-- Dynamic sub-agent discovery from `agents/*/info.yaml` + `agents/*/tools.py`
-- Shared middleware stack for summarization, PII protection, and tool-call limits
-- Synchronous sub-agent delegation for bounded tasks (`invoke_subagent`)
-- Asynchronous background jobs for long-running work (`start_async_task`, `check_async_task`)
-- Complex-task background solver (`start_multiagent_solver`) for multi-step objectives
-- Streaming CLI loop with real-time token output
-
-## Project Structure
-
-```
-OpenJar/
-├── main.py
-├── agents/
-│   ├── file_explorer/
-│   │   ├── info.yaml
-│   │   └── tools.py
-│   └── research/
-│       ├── info.yaml
-│       └── tools.py
-├── src/
-│   ├── __init__.py
-│   ├── agent/
-│   │   ├── discovery.py
-│   │   ├── job_manager.py
-│   │   ├── loader.py
-│   │   ├── openjar.py
-│   │   └── middlewares/
-│   │       ├── async_subagent.py
-│   │       ├── complex_task.py
-│   │       ├── dynamic_prompt.py
-│   │       ├── load_agents.py
-│   │       └── subagent.py
-│   ├── io/
-│   ├── memory/
-│   ├── utils/
-│   └── vault/
-├── pyproject.toml
-└── README.md
-```
+- Loads sub-agents dynamically from `agents/*/info.yaml` and `agents/*/tools.py`
+- Routes work to specialized agents with sync and async delegation
+- Supports background task execution and completion notifications
+- Streams model output incrementally to a CLI listener
+- Keeps orchestration logic centralized in a lightweight main agent
 
 ## Requirements
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (recommended)
+- `uv` (recommended dependency manager)
+- Redis server running locally (default: `redis://localhost:6379`)
+- Provider API key(s), for example OpenAI
 
 ## Installation
 
@@ -58,47 +26,61 @@ cd OpenJar
 uv sync
 ```
 
-## Configuration
+## Environment Setup
 
-Create a `.env` file in the project root with credentials for the provider(s) you use.
-
-Example:
+Create a `.env` file in the project root:
 
 ```env
 OPENAI_API_KEY=your-openai-api-key
 GROQ_API_KEY=your-groq-api-key
 ```
 
-## Run the CLI
+Only define keys for providers you actually use.
+
+## Run
+
+Start Redis first, then run the app:
 
 ```bash
-uv run python main.py
+uv run .\main.py
 ```
 
-The CLI starts an interactive loop and streams model output. Use `exit` or `q` to quit.
+Notes:
 
-## How OpenJar Works
+- On non-Windows shells, use `uv run ./main.py` or `uv run python main.py`.
+- Type `exit` or `q` in the CLI to quit.
 
-1. `OpenJar` (in `src/agent/openjar.py`) builds the main orchestrator agent.
-2. `AgentLoader` discovers and loads sub-agents from `agents/`.
-3. Middleware injects orchestration tools and policies:
-   - routing/discovery (`get_sub_agents`)
-   - sync delegation (`invoke_subagent`)
-   - async job lifecycle (`start_async_task`, `check_async_task`, `cancel_async_task`, `list_async_task`)
-   - complex background solver (`start_multiagent_solver`)
-4. `JobManager` tracks background task state and results.
+## Architecture Overview
 
-## Creating a Sub-Agent
+1. `OpenJar` in `src/agent/openjar.py` creates the main orchestrator agent.
+2. `AgentLoader` in `src/agent/loader.py` discovers and loads sub-agents.
+3. Middleware in `src/agent/middlewares/` injects orchestration capabilities.
+4. `JobManager` in `src/agent/job_manager.py` handles background task lifecycle.
+5. Redis pub/sub is used to stream chunks and async notifications per thread.
 
-Create a folder under `agents/` with this shape:
+## Core Files
 
+```text
+main.py
+src/agent/openjar.py
+src/agent/loader.py
+src/agent/job_manager.py
+src/agent/middlewares/
+agents/file_explorer/
+agents/research/
 ```
+
+## Add a New Sub-Agent
+
+Create a new folder:
+
+```text
 agents/my_agent/
-├── info.yaml
-└── tools.py
+  info.yaml
+  tools.py
 ```
 
-### `info.yaml`
+Example `info.yaml`:
 
 ```yaml
 name: my_agent
@@ -110,7 +92,7 @@ provider:
   type: openai
 ```
 
-### `tools.py`
+Example `tools.py`:
 
 ```python
 from langchain.tools import tool
@@ -122,9 +104,12 @@ async def my_tool(query: str) -> str:
     return f"Handled: {query}"
 ```
 
-On next run, the orchestrator auto-discovers and loads the new sub-agent.
+The orchestrator will discover the new sub-agent on next run.
 
-## Minimal Programmatic Usage
+## Programmatic Usage
+
+`OpenJar` currently exposes streaming methods (`astream`, `listen_to_thread`).
+Minimal example:
 
 ```python
 import asyncio
@@ -134,19 +119,58 @@ from src import OpenJar
 
 async def run() -> None:
     app = OpenJar(model="openai:gpt-5.4-2026-03-05")
-    result = await app.ainvoke("Summarize the architecture of this repository.")
-    print(result)
+    thread_id = "demo-thread"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    listener_task = asyncio.create_task(_listen(app, thread_id))
+    await app.astream("Summarize this repository architecture.", config=config)
+
+    listener_task.cancel()
+    await app.redis_client.aclose()
+
+
+async def _listen(app: OpenJar, thread_id: str) -> None:
+    async for event in app.listen_to_thread(thread_id):
+        print(event)
 
 
 if __name__ == "__main__":
     asyncio.run(run())
 ```
 
-## Notes
+## Troubleshooting
 
-- Current `main.py` sets the orchestrator model to `openai:gpt-5.4-2026-03-05`.
-- If you use async background jobs, surface and persist returned job IDs so you can query status later.
+- No output in CLI:
+  - confirm Redis is running
+  - confirm API keys are present in `.env`
+- Sub-agent not found:
+  - verify `agents/<name>/info.yaml` and `agents/<name>/tools.py` both exist
+  - verify YAML fields are valid
 
-## License
+## Roadmap / Planned Features
 
-MIT
+- Long-term and mid-term memory layers
+- Prompt-injection defense and sensitive-data redaction
+- Centralized environment and secret management
+- Trigger and schedule orchestration
+- Speech-to-text (STT) and text-to-speech (TTS)
+- Tool runtime sandboxing
+- Least-privilege data access for browser and online sources
+- Tool code safety validation
+- Human-in-the-loop approvals and checkpoints
+- Agent steering and policy controls
+- Persistent memory update workflows
+- Browser automation and control
+- Multi-channel chat interfaces
+- Enhanced CLI application experience
+- Multi-modal input support
+- Cost tracking, tracing, and observability
+- Multi-session chat threading
+- Reusable skill system
+- Infinite-loop prevention safeguards
+- Document and file understanding pipeline
+- Sandboxed code execution
+- Agent teams / Swarms / Different patterns of multiagents
+- Restrict passing full context between agents
+- Customize main agent's soul/personality
+- Add workflow to start everytime agent is woken up, or start of new day (or detect user start to engage)

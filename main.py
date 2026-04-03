@@ -1,8 +1,8 @@
 import asyncio
 import sys
+import uuid
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessageChunk
 from rich.console import Console
 
 from src import OpenJar, logging
@@ -10,7 +10,7 @@ from src import OpenJar, logging
 load_dotenv()
 
 console = Console()
-# logging.setup_logging()
+logging.setup_logging()
 
 
 def resolve_query(raw: str) -> str | None:
@@ -19,41 +19,66 @@ def resolve_query(raw: str) -> str | None:
     return stripped or None
 
 
-async def stream_response(agent, query: str, config):
-    """Stream an LLM response for a given query."""
-    console.print()
-    console.print("[bold #9e2833]OpenJar[/bold #9e2833] [dim]- response[/dim]")
-    async for chunk, _ in agent.astream(
-        query,
-        stream_mode="messages",
-        config=config,
-    ):
-        if isinstance(chunk, AIMessageChunk) and chunk.content:
-            console.print(chunk.content, end="", style="white")
-    console.print()
+async def listener(openjar: OpenJar, thread_id: str):
+    try:
+        async for message in openjar.listen_to_thread(thread_id):
+            msg_type = message.get("type")
+            data = message.get("data", "")
+
+            if msg_type == "chunk":
+                console.print(data, end="", style="white")
+
+            if msg_type == "notification":
+                console.print()
+                console.print(f"[dim]{data}[/dim]")
+                console.print(
+                    "\n[bold #9e2833]Enter your request[/bold #9e2833] [dim](exit, q)[/dim]: ",
+                    end="",
+                )
+
+            if msg_type == "stream_end":
+                console.print()
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        console.print()
+        console.print(f"[#9e2833]Listener Error:[/#9e2833] {str(e)}")
 
 
 async def main():
-    openjar = OpenJar(model="openai:gpt-5.4-2026-03-05")
-    config = {"configurable": {"thread_id": "1"}}
+    async with OpenJar(model="groq:openai/gpt-oss-120b") as openjar:
+        thread_id = uuid.uuid4().hex[:8]
+        config = {"configurable": {"thread_id": thread_id}}
 
-    try:
-        while True:
-            prompt = (
-                "\n[bold #9e2833]Enter your request[/bold #9e2833] "
-                "[dim](exit, q)[/dim]: "
-            )
-            raw = await asyncio.to_thread(console.input, prompt)
-            if raw.strip().lower() in ("exit", "q"):
-                break
+        listener_task = asyncio.create_task(listener(openjar, thread_id))
 
-            query = resolve_query(raw)
-            if query is None:
-                continue
+        try:
+            while True:
+                prompt = (
+                    "\n[bold #9e2833]Enter your request[/bold #9e2833] "
+                    "[dim](exit, q)[/dim]: "
+                )
+                raw = await asyncio.to_thread(console.input, prompt)
 
-            await stream_response(openjar, query, config)
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {str(e)}")
+                if raw.strip().lower() in ("exit", "q"):
+                    break
+
+                query = resolve_query(raw)
+                if query is None:
+                    continue
+
+                console.print(
+                    "[bold #9e2833]OpenJar[/bold #9e2833] [dim]- response[/dim]"
+                )
+
+                await openjar.astream(query, config=config)  # type: ignore
+
+        except Exception as e:
+            console.print()
+            console.print(f"[#9e2833]Main Error:[/#9e2833] {str(e)}")
+        finally:
+            listener_task.cancel()
 
 
 if __name__ == "__main__":

@@ -1,17 +1,17 @@
-from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
-    ModelRequest,
-    ModelResponse,
-)
-from langchain_core.messages import AIMessage, SystemMessage
-from langchain_core.tools import tool
+from langchain.tools import tool
 
-from src.agent.job_manager import job_manager
+from src.agent.artifact_manager import LENGTH_THRESHOLD, Artifact, ArtifactManager
+from src.agent.job_manager import Job, JobManager
 from src.agent.loader import AgentLoader
+from src.utils import get_logger
+
+logger = get_logger(__name__)
 
 ASYNC_RUN_SUBAGENT_TOOL_DESCRIPTION = """
 Use this tool to start a sub-agent task asynchronously in the background.
@@ -71,7 +71,7 @@ Use when:
 This is useful for job lifecycle management across multiple background tasks.
 """
 
-ASYNC_SYSTEM_PROMPT = """
+ASYNC_SKILL_CONTENT = """\
 ## async sub-agent tools
 
 You can delegate long-running work to background sub-agent jobs.
@@ -101,6 +101,14 @@ Reliability guidance:
 """
 
 
+@dataclass
+class ContextSchema:
+    """Context schema for async sub-agent tool calls."""
+
+    call_origin: str
+    job_id: str
+
+
 class AsyncSubAgentMiddleware(AgentMiddleware):
     """
     Middleware that provides tools for running, checking, canceling and
@@ -112,36 +120,22 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
         self,
         *,
         agent_loader: AgentLoader,
+        job_manager: JobManager,
+        artifact_manager: ArtifactManager,
         run_subagent_prompt: str = ASYNC_RUN_SUBAGENT_TOOL_DESCRIPTION,
         check_subagent_prompt: str = ASYNC_CHECK_SUBAGENT_TOOL_DESCRIPTION,
         cancel_subagent_prompt: str = ASYNC_CANCEL_SUBAGENT_TOOL_DESCRIPTION,
         list_subagent_prompt: str = ASYNC_LIST_SUBAGENT_TOOL_DESCRIPTION,
-        system_prompt: str = ASYNC_SYSTEM_PROMPT,
         recursion_limit: int = 70,
     ) -> None:
-        """
-        Initializes the AsyncSubAgentMiddleware with the provided parameters.
-
-        Args:
-            agent_loader (AgentLoader): An instance of AgentLoader to load sub-agents by name.
-            run_subagent_prompt (str, optional): The prompt for the start_async_task tool. Defaults to ASYNC_RUN_SUBAGENT_TOOL_DESCRIPTION.
-            check_subagent_prompt (str, optional): The prompt for the check_async_task tool. Defaults to ASYNC_CHECK_SUBAGENT_TOOL_DESCRIPTION.
-            cancel_subagent_prompt (str, optional): The prompt for the cancel_async_task tool. Defaults to ASYNC_CANCEL_SUBAGENT_TOOL_DESCRIPTION.
-            list_subagent_prompt (str, optional): The prompt for the list_async_task tool. Defaults to ASYNC_LIST_SUBAGENT_TOOL_DESCRIPTION.
-            system_prompt (str, optional): The system prompt for the middleware. Defaults to ASYNC_SYSTEM_PROMPT.
-            recursion_limit (int, optional): The recursion limit for the middleware. Defaults to 70.
-        """
         super().__init__()
         self.agent_loader = agent_loader
-        self.run_subagent_prompt = run_subagent_prompt
-        self.check_subagent_prompt = check_subagent_prompt
-        self.cancel_subagent_prompt = cancel_subagent_prompt
-        self.list_subagent_prompt = list_subagent_prompt
-        self.system_prompt = system_prompt
+        self.job_manager = job_manager
+        self.artifact_manager = artifact_manager
         self.recursion_limit = recursion_limit
 
-        @tool(description=self.run_subagent_prompt)
-        def start_async_task(agent_name: str, description: str) -> str:
+        @tool(description=run_subagent_prompt)
+        async def start_async_task(agent_name: str, description: str) -> str:
             """
             Launch a subagent task in the background for long-running tasks.
             Poll the status or retrieve the result with the job(...) tool.
@@ -153,11 +147,15 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
             Returns:
                 str: A message containing the background job ID.
             """
-            job_id = job_manager.submit(agent_name, description, self._invoke_subagent)
+            job_id = self.job_manager.submit(
+                agent_name,
+                description,
+                self._invoke_subagent,
+            )
             return f"Background job started. Job ID: {job_id}"
 
-        @tool(description=self.check_subagent_prompt)
-        def check_async_task(job_id: str) -> str:
+        @tool(description=check_subagent_prompt)
+        async def check_async_task(job_id: str) -> str:
             """
             Check current status and retrieve result for a background job.
 
@@ -167,12 +165,12 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
             Returns:
                 str: Status information or the completed result.
             """
-            result = job_manager.get_job(job_id)
+            result = self.job_manager.get_job(job_id)
 
             return self._format_check(result, job_id)
 
-        @tool(description=self.cancel_subagent_prompt)
-        def cancel_async_task(job_id: str) -> str:
+        @tool(description=cancel_subagent_prompt)
+        async def cancel_async_task(job_id: str) -> str:
             """
             Cancel a background job if it's still running.
 
@@ -182,10 +180,10 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
             Returns:
                 str: A message indicating the result of the cancellation attempt.
             """
-            result = job_manager.cancel_job(job_id)
+            result = self.job_manager.cancel_job(job_id)
             return f"Job status: {result.get('status')}. Message: {result.get('message', '')}"
 
-        @tool(description=self.list_subagent_prompt)
+        @tool(description=list_subagent_prompt)
         def list_async_task() -> str:
             """
             List all background jobs with their current status.
@@ -193,7 +191,7 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
             Returns:
                 str: A list of all background jobs with their current status.
             """
-            jobs = job_manager.get_all()
+            jobs = self.job_manager.get_all()
             return self._format_list(jobs)
 
         self.tools = [
@@ -203,17 +201,37 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
             list_async_task,
         ]
 
-    async def _invoke_subagent(self, agent_name: str, description: str) -> str:
+    async def _invoke_subagent(
+        self,
+        agent_name: str,
+        description: str,
+        thread_id: str,
+        job_id: str = "",
+    ) -> str | Artifact:
         agent = self.agent_loader.get(agent_name)
 
         try:
             result = await agent.ainvoke(
                 {"messages": [{"role": "user", "content": description}]},
-                config={"recursion_limit": self.recursion_limit},
+                config={
+                    "recursion_limit": self.recursion_limit,
+                    "configurable": {"thread_id": thread_id},
+                },
+                context=ContextSchema(
+                    call_origin="async_subagent",
+                    job_id=job_id,
+                ),
             )
         except Exception as e:
             return f"Error invoking subagent '{agent_name}': {str(e)}"
-        return result["messages"][-1].content
+
+        content = result["messages"][-1].content
+
+        if len(content) > LENGTH_THRESHOLD:
+            artifact = await self.artifact_manager.aadd_artifact(content, description)
+            return artifact
+        else:
+            return content
 
     def _format_check(self, result: dict[str, Any], job_id: str) -> str:
         if not result:
@@ -240,77 +258,18 @@ class AsyncSubAgentMiddleware(AgentMiddleware):
 
         return "\n".join(lines)
 
-    def _format_list(self, jobs: list) -> str:
+    def _format_list(self, jobs: list[Job]) -> str:
         if not jobs:
             return "No background jobs found."
 
         lines = []
         for job in jobs:
-            job_id = job.get("job_id", "")
-            status = job.get("status", "unknown")
-            agent = job.get("agent_name", "")
-            description = job.get("description", "")
+            job_id = job.id
+            status = job.status
+            agent = job.agent_name
+            description = job.description
             lines.append(
                 f"job_id: {job_id} | status: {status} | agent: {agent} | description: {description}"
             )
 
         return "\n".join(lines)
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest[None],
-        handler: Callable[[ModelRequest[None]], ModelResponse[Any]],
-    ) -> ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]:
-        """
-        Wraps the model call to include the async subagent tool system prompt.
-
-        Args:
-            request (ModelRequest[None]): Model request to execute (includes state and runtime).
-            handler (Callable[[ModelRequest[None]], Awaitable[ModelResponse[Any]]]): Asynchronous callback that executes the model request and returns
-                `ModelResponse`.
-
-        Returns:
-            ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]: The model call result.
-        """
-        if request.system_message is not None:
-            new_system_content = [
-                *request.system_message.content_blocks,
-                {"type": "text", "text": f"\n\n{self.system_prompt}"},
-            ]
-        else:
-            new_system_content = [{"type": "text", "text": self.system_prompt}]
-
-        new_system_message = SystemMessage(
-            content=cast("list[str | dict[str, str]]", new_system_content)
-        )
-
-        return handler(request.override(system_message=new_system_message))
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[None],
-        handler: Callable[[ModelRequest[None]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]:
-        """
-        Asynchronous version of `wrap_model_call`. Update the system message to include the get async sub-agents prompt
-
-        Args:
-            request (ModelRequest[None]): Model request to execute (includes state and runtime).
-            handler (Callable[[ModelRequest[None]], Awaitable[ModelResponse[Any]]]): Asynchronous callback that executes the model request and returns
-                `ModelResponse`.
-
-        Returns:
-            ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]: The model call result.
-        """
-        if request.system_message is not None:
-            new_system_content = [
-                *request.system_message.content_blocks,
-                {"type": "text", "text": f"\n\n{self.system_prompt}"},
-            ]
-        else:
-            new_system_content = [{"type": "text", "text": self.system_prompt}]
-        new_system_message = SystemMessage(
-            content=cast("list[str | dict[str, str]]", new_system_content)
-        )
-
-        return await handler(request.override(system_message=new_system_message))

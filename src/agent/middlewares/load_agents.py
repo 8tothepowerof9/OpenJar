@@ -1,17 +1,8 @@
-from collections.abc import Awaitable, Callable
-from difflib import SequenceMatcher
-from typing import Any, cast
-
+import numpy as np
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
-    ModelRequest,
-    ModelResponse,
-)
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.embeddings import Embeddings
 from langchain_core.tools import tool
-from langgraph.prebuilt.tool_node import ToolCallRequest
-from langgraph.types import Command
+from langchain_openai import OpenAIEmbeddings
 
 from src.agent.loader import AgentLoader
 
@@ -35,8 +26,7 @@ When not to use:
 2. No sub-agent execution is needed for the current response.
 """
 
-GET_SUB_AGENTS_SYSTEM_PROMPT = """
-
+GET_SUB_AGENTS_SKILL_CONTENT = """\
 ## get_sub_agents
 
 You can call get_sub_agents to discover which sub-agent should handle a task.
@@ -64,35 +54,27 @@ Do not fabricate agent names. Use only names returned by available tools.
 
 class GetSubAgentsMiddleware(AgentMiddleware):
     """
-    Middleware to provide a tool for retrieving relevant sub-agents based on a query,
-    and to inject a system prompt guiding the agent to use this tool effectively.
+    Middleware to provide a tool for retrieving relevant sub-agents based on a query.
     """
 
     def __init__(
         self,
         *,
         agents_loader: AgentLoader,
-        system_prompt: str = GET_SUB_AGENTS_SYSTEM_PROMPT,
+        embeddings: Embeddings | None = None,
         tool_description: str = GET_SUB_AGENTS_TOOL_DESCRIPTION,
         top_k: int = 5,
     ) -> None:
-        """
-        Initialize the GetSubAgentsMiddleware.
-
-        Args:
-            agents_loader (AgentLoader): The loader for initializing sub-agents.
-            system_prompt (str, optional): The system prompt for the middleware. Defaults to GET_SUB_AGENTS_SYSTEM_PROMPT.
-            tool_description (str, optional): The description for the get_sub_agents tool. Defaults to GET_SUB_AGENTS_TOOL_DESCRIPTION.
-            top_k (int, optional): The number of top agents to return. Defaults to 5.
-        """
         super().__init__()
         self.agent_loader = agents_loader
-        self.system_prompt = system_prompt
+        self.embeddings = embeddings or OpenAIEmbeddings()
         self.tool_description = tool_description
         self.top_k = top_k
+        self._agent_embeddings: np.ndarray | None = None
+        self._agent_texts: list[str] = []
 
         @tool(description=self.tool_description)
-        def get_sub_agents(query: str) -> str:
+        async def get_sub_agents(query: str) -> str:
             """
             Retrieve suitable sub-agents name and description based on query.
 
@@ -102,103 +84,58 @@ class GetSubAgentsMiddleware(AgentMiddleware):
             Returns:
                 str: formatted string of agent name and description
             """
-            agents = self._search_agent(query)
+            agents = await self._search_agent(query)
             return self._format_agents(agents)
 
         self.tools = [get_sub_agents]
 
-    def _similarity(self, query: str, text: str) -> float:
-        return SequenceMatcher(None, query.lower(), text.lower()).ratio()
+    async def _build_agent_embeddings(self) -> None:
+        """Compute and cache embeddings for all agent descriptions."""
+        all_agents = list(self.agent_loader.agents.values())
+        self._agent_texts = [
+            f"{agent.name}: {agent.description}" for agent in all_agents
+        ]
+        vectors = await self.embeddings.aembed_documents(self._agent_texts)
+        self._agent_embeddings = np.array(vectors)
 
-    def _format_agents(self, agents: list[tuple[str, str]]) -> str:
+    def _cosine_similarity(
+        self, query_vec: np.ndarray, doc_vecs: np.ndarray
+    ) -> np.ndarray:
+        """Compute cosine similarity between a query vector and document vectors."""
+        query_norm = query_vec / np.linalg.norm(query_vec)
+        doc_norms = doc_vecs / np.linalg.norm(doc_vecs, axis=1, keepdims=True)
+        return doc_norms @ query_norm
+
+    def _format_agents(self, agents: list[tuple[str, str, bool]]) -> str:
         if not agents:
             return "No agents found."
 
         lines = []
-        width = max(len(name) for name, _ in agents)
-        for i, (name, description) in enumerate(agents, 1):
-            lines.append(f"  {i}. {name:<{width}}  -  {description}")
+        width = max(len(name) for name, _, _ in agents)
+        for i, (name, description, is_multi) in enumerate(agents, 1):
+            lines.append(
+                f"  {i}. {name:<{width}}  -  {description} {'[Multi-agent]' if is_multi else ''}"
+            )
         return "\n".join(lines)
 
-    # TODO: Add semantic retrieval instead
-    def _search_agent(self, query: str | None) -> list[tuple[str, str]]:
+    async def _search_agent(self, query: str | None) -> list[tuple[str, str, bool]]:
         all_agents = [
-            (agent.name, agent.description)
+            (agent.name, agent.description, agent.is_multi)
             for agent in self.agent_loader.agents.values()
         ]
 
         if not query:
             return all_agents[: self.top_k]
 
-        scored = []
-        for name, description in all_agents:
-            name_score = self._similarity(query, name)
-            desc_score = self._similarity(query, description)
-            score = 0.4 * name_score + 0.6 * desc_score
-            scored.append((score, name, description))
+        if self._agent_embeddings is None or len(self._agent_texts) != len(all_agents):
+            await self._build_agent_embeddings()
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        assert self._agent_embeddings is not None
 
-        if scored and scored[0][0] < 0.1:
-            return all_agents
+        query_vec = np.array(await self.embeddings.aembed_query(query))
+        scores = self._cosine_similarity(query_vec, self._agent_embeddings)
+        top_indices = np.argsort(scores)[::-1][: self.top_k]
 
-        return [(name, description) for _, name, description in scored[: self.top_k]]
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest[None],
-        handler: Callable[[ModelRequest[None]], ModelResponse[Any]],
-    ) -> ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]:
-        """
-        Update the system message to include the get sub-agents prompt
-
-        Args:
-            request (ModelRequest[None]): Model request to execute (includes state and runtime).
-            handler (Callable[[ModelRequest[None]], ModelResponse[Any]]): Async callback that executes the model request and returns
-                `ModelResponse`.
-
-        Returns:
-            ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]: The model call result.
-        """
-        if request.system_message is not None:
-            new_system_content = [
-                *request.system_message.content_blocks,
-                {"type": "text", "text": f"\n\n{self.system_prompt}"},
-            ]
-        else:
-            new_system_content = [{"type": "text", "text": self.system_prompt}]
-
-        new_system_message = SystemMessage(
-            content=cast("list[str | dict[str, str]]", new_system_content)
-        )
-
-        return handler(request.override(system_message=new_system_message))
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[None],
-        handler: Callable[[ModelRequest[None]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]:
-        """
-        Asynchronous version of `wrap_model_call`. Update the system message to include the get sub-agents prompt
-
-        Args:
-            request (ModelRequest[None]): Model request to execute (includes state and runtime).
-            handler (Callable[[ModelRequest[None]], Awaitable[ModelResponse[Any]]]): Asynchronous callback that executes the model request and returns
-                `ModelResponse`.
-
-        Returns:
-            ModelResponse[Any] | AIMessage | ExtendedModelResponse[Any]: The model call result.
-        """
-        if request.system_message is not None:
-            new_system_content = [
-                *request.system_message.content_blocks,
-                {"type": "text", "text": f"\n\n{self.system_prompt}"},
-            ]
-        else:
-            new_system_content = [{"type": "text", "text": self.system_prompt}]
-        new_system_message = SystemMessage(
-            content=cast("list[str | dict[str, str]]", new_system_content)
-        )
-
-        return await handler(request.override(system_message=new_system_message))
+        return [
+            (all_agents[i][0], all_agents[i][1], all_agents[i][2]) for i in top_indices
+        ]

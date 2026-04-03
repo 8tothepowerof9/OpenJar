@@ -3,9 +3,11 @@ from typing import Any, Sequence
 from langchain.agents.middleware import (
     ClearToolUsesEdit,
     ContextEditingMiddleware,
+    ModelRetryMiddleware,
     PIIMiddleware,
     SummarizationMiddleware,
     ToolCallLimitMiddleware,
+    ToolRetryMiddleware,
 )
 from langchain.chat_models import BaseChatModel
 
@@ -15,8 +17,8 @@ def create_shared_middleware(
 ) -> Sequence[Any]:
     """Return the middleware stack shared by the orchestrator and all sub-agents.
 
-    This includes PII protection, summarization, tool-call limits, and
-    context editing.
+    This includes PII protection, summarization, tool-call limits,
+    context editing and retry mechanisms.
     """
     return [
         SummarizationMiddleware(
@@ -42,4 +44,6 @@ def create_shared_middleware(
                 ),
             ],
         ),
+        ModelRetryMiddleware(max_retries=2, backoff_factor=2.0, initial_delay=1.0),
+        ToolRetryMiddleware(max_retries=3, backoff_factor=2.0, initial_delay=1.0),
     ]
