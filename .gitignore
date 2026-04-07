@@ -1,0 +1,14 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+.venv
+.env
+CLAUDE.md
+AGENTS.md
+openspec/
+.pytest_cache/
+.claude/
